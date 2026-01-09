@@ -39,13 +39,24 @@ def kwargs(args):
 
 
 @mark.parametrize(("key", "val"), [("batch", True), ("leadtime", 6)])
-def test_execute_fail_bad_args(key, kwargs, logged, utc, val):
+def test_execute__fail_bad_args(key, kwargs, logged, utc, val):
     kwargs.update({"cycle": utc(), key: val})
     assert execute.execute(**kwargs) is None
     assert logged(f"TestDriver does not accept argument '{key}'")
 
 
-def test_execute_fail_stdin_not_ok(kwargs, utc):
+def test_execute__fail_bad_task(kwargs, logged, utc):
+    kwargs.update({"cycle": utc(), "task": "foo"})
+    assert execute.execute(**kwargs) is None
+    assert logged("TestDriver driver has no task 'foo'")
+
+
+def test_execute__fail_cannot_load_driver_class(kwargs):
+    kwargs["module"] = "bad_module_name"
+    assert execute.execute(**kwargs) is None
+
+
+def test_execute__fail_stdin_not_ok(kwargs, utc):
     kwargs["config"] = None
     kwargs["cycle"] = utc()
     kwargs["stdin_ok"] = False
@@ -56,7 +67,7 @@ def test_execute_fail_stdin_not_ok(kwargs, utc):
 
 @mark.parametrize("graph", [True, False])
 @mark.parametrize("remove", [[], ["schema_file"]])
-def test_execute_pass(graph, kwargs, logged, remove, tmp_path, utc):
+def test_execute__pass(graph, kwargs, logged, remove, tmp_path, utc):
     for kwarg in remove:
         del kwargs[kwarg]
     kwargs["cycle"] = utc()
@@ -67,12 +78,15 @@ def test_execute_pass(graph, kwargs, logged, remove, tmp_path, utc):
     with (
         patch.object(execute, "_get_driver_class") as gdc,
         patch.object(execute, "getfullargspec") as gfa,
+        patch.object(execute, "tasknames", return_value=["forty_two"]),
     ):
         node = Mock(graph=graph_code) if graph else Mock()
         node.ref = 42
         driverobj = Mock()
         driverobj.forty_two.return_value = node
-        gdc.return_value = (Mock(return_value=driverobj), kwargs["module"])
+        class_ = Mock(return_value=driverobj)
+        setattr(class_, "__name__", "test")
+        gdc.return_value = (class_, kwargs["module"])
         gfa().args = {"batch", "cycle"}
         val = execute.execute(**kwargs)
         assert val
@@ -82,30 +96,25 @@ def test_execute_pass(graph, kwargs, logged, remove, tmp_path, utc):
         assert graph_file.read_text().strip() == graph_code
 
 
-def test_execute_fail_cannot_load_driver_class(kwargs):
-    kwargs["module"] = "bad_module_name"
-    assert execute.execute(**kwargs) is None
-
-
-def test_tasks_fail(args, logged, tmp_path):
+def test_tasks__fail(args, logged, tmp_path):
     module = tmp_path / "not.py"
     tasks = execute.tasks(classname=args.classname, module=module)
     assert tasks == {}
     assert logged("Could not get tasks from class %s in module %s" % (args.classname, module))
 
 
-def test_tasks_fail_no_cycle(args, kwargs, logged):
+def test_tasks__fail_no_cycle(args, kwargs, logged):
     assert execute.execute(**kwargs) is None
     assert logged("%s requires argument '%s'" % (args.classname, "cycle"))
 
 
 @mark.parametrize("f", [Path, str])
-def test_tasks_pass(args, f):
+def test_tasks__pass(args, f):
     tasks = execute.tasks(classname=args.classname, module=f(args.module))
     assert tasks["forty_two"] == "Forty Two."
 
 
-def test__get_driver_class_explicit_fail_bad_class(args, logged):
+def test__get_driver_class__explicit_fail_bad_class(args, logged):
     bad_class = "BadClass"
     c, module_path = execute._get_driver_class(classname=bad_class, module=args.module)
     assert c is None
@@ -113,7 +122,7 @@ def test__get_driver_class_explicit_fail_bad_class(args, logged):
     assert logged("Module %s has no class %s" % (args.module, bad_class))
 
 
-def test__get_driver_class_explicit_fail_bad_name(args, logged):
+def test__get_driver_class__explicit_fail_bad_name(args, logged):
     bad_name = Path("bad_name")
     c, module_path = execute._get_driver_class(classname=args.classname, module=bad_name)
     assert c is None
@@ -121,7 +130,7 @@ def test__get_driver_class_explicit_fail_bad_name(args, logged):
     assert logged("Could not load module %s" % bad_name)
 
 
-def test__get_driver_class_explicit_fail_bad_path(args, logged, tmp_path):
+def test__get_driver_class__explicit_fail_bad_path(args, logged, tmp_path):
     module = tmp_path / "not.py"
     c, module_path = execute._get_driver_class(classname=args.classname, module=module)
     assert c is None
@@ -129,7 +138,7 @@ def test__get_driver_class_explicit_fail_bad_path(args, logged, tmp_path):
     assert logged("Could not load module %s" % module)
 
 
-def test__get_driver_class_explicit_fail_bad_spec(args, logged):
+def test__get_driver_class__explicit_fail_bad_spec(args, logged):
     with patch.object(execute, "spec_from_file_location", return_value=None):
         c, module_path = execute._get_driver_class(classname=args.classname, module=args.module)
     assert c is None
@@ -137,14 +146,14 @@ def test__get_driver_class_explicit_fail_bad_spec(args, logged):
     assert logged("Could not load module %s" % args.module)
 
 
-def test__get_driver_class_explicit_pass(args):
+def test__get_driver_class__explicit_pass(args):
     c, module_path = execute._get_driver_class(classname=args.classname, module=args.module)
     assert c
     assert c.__name__ == "TestDriver"
     assert module_path == args.module
 
 
-def test__get_driver_class_implicit_pass(args):
+def test__get_driver_class__implicit_pass(args):
     with patch.object(Path, "cwd", return_value=fixture_path()):
         c, module_path = execute._get_driver_class(classname=args.classname, module=args.module)
     assert c
@@ -152,7 +161,7 @@ def test__get_driver_class_implicit_pass(args):
     assert module_path == args.module
 
 
-def test__get_driver_module_explicit_absolute_fail_syntax_error(args, logged, tmp_path):
+def test__get_driver_module__explicit_absolute_fail_syntax_error(args, logged, tmp_path):
     module = tmp_path / "module.py"
     module.write_text("syntax error\n%s" % args.module.read_text())
     assert module.is_absolute()
@@ -162,37 +171,37 @@ def test__get_driver_module_explicit_absolute_fail_syntax_error(args, logged, tm
     assert logged("SyntaxError: invalid syntax")
 
 
-def test__get_driver_module_explicit_absolute_fail_bad_path(args):
+def test__get_driver_module__explicit_absolute_fail_bad_path(args):
     assert args.module.is_absolute()
     module = args.module.with_suffix(".bad")
     assert not execute._get_driver_module_explicit(module=module)
 
 
-def test__get_driver_module_explicit_absolute_pass(args):
+def test__get_driver_module__explicit_absolute_pass(args):
     assert args.module.is_absolute()
     assert execute._get_driver_module_explicit(module=args.module)
 
 
-def test__get_driver_module_explicit_relative_fail_bad_path(args):
+def test__get_driver_module__explicit_relative_fail_bad_path(args):
     args.module = Path(os.path.relpath(args.module)).with_suffix(".bad")
     assert not args.module.is_absolute()
     assert not execute._get_driver_module_explicit(module=args.module)
 
 
-def test__get_driver_module_explicit_relative_pass(args):
+def test__get_driver_module__explicit_relative_pass(args):
     args.module = Path(os.path.relpath(args.module))
     assert not args.module.is_absolute()
     assert execute._get_driver_module_explicit(module=args.module)
 
 
-def test__get_driver_module_implicit_pass_full_package():
+def test__get_driver_module__implicit_pass_full_package():
     assert execute._get_driver_module_implicit("uwtools.tests.fixtures.testdriver")
 
 
-def test__get_driver_module_implicit_pass():
+def test__get_driver_module__implicit_pass():
     with patch.object(sys, "path", [str(fixture_path()), *sys.path]):
         assert execute._get_driver_module_implicit("testdriver")
 
 
-def test__get_driver_module_implicit_fail():
+def test__get_driver_module__implicit_fail():
     assert not execute._get_driver_module_implicit("no.such.module")

@@ -11,6 +11,8 @@ from pathlib import Path
 from traceback import format_exc
 from typing import TYPE_CHECKING
 
+from iotaa import tasknames
+
 from uwtools.drivers.support import tasks as _tasks
 from uwtools.logging import log
 from uwtools.strings import STR
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
 def execute(
     module: Path | str,
     classname: str,
-    task: str,
+    task: str | None = None,
     schema_file: str | None = None,
     config: Path | str | None = None,
     cycle: datetime | None = None,
@@ -48,7 +50,7 @@ def execute(
 
     :param module: Path to driver module or name of module on sys.path.
     :param classname: Name of driver class to instantiate.
-    :param task: Name of driver task to execute.
+    :param task: Name of driver task to execute. If omitted, a list of available tasks is displayed.
     :param schema_file: The JSON Schema file to use for validation.
     :param config: Path to config file (read stdin if missing or None).
     :param cycle: The cycle.
@@ -64,6 +66,11 @@ def execute(
     if not class_:
         return None
     assert module_path is not None
+    if bad_task := task and task not in tasknames(class_):
+        log.error("%s driver has no task '%s'", class_.__name__, task)
+    if bad_task or task is None:
+        _list_available_tasks(module, classname)
+        return None
     args = dict(locals())
     accepted = set(getfullargspec(class_).args)
     non_optional = {STR.cycle, STR.leadtime}
@@ -156,6 +163,13 @@ def _get_driver_module_implicit(module: str) -> ModuleType | None:
         return import_module(module)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _list_available_tasks(module: Path | str, classname: str) -> None:
+    log.error("Available tasks:")
+    for taskname, description in tasks(module, classname).items():
+        log.error("  %s" % taskname)
+        log.error("    %s" % (description or "No description available."))
 
 
 __all__ = ["execute", "tasks"]
