@@ -65,7 +65,19 @@ class _ROCOTO(_ValsMatchKeys):
     Rocoto strings.
     """
 
+    COMPLETE: str = _
+    CREATED: str = _
+    DEAD: str = _
+    DYING: str = _
+    ERROR: str = _
+    QUEUED: str = _
+    RUNNING: str = _
+    STALLED: str = _
+    STUCK: str = _
+    SUBMITTING: str = _
+    SUCCEEDED: str = _
     account: str = _
+    active: str = _
     and_: str = "and"
     attrs: str = _
     command: str = _
@@ -82,6 +94,7 @@ class _ROCOTO(_ValsMatchKeys):
     envars: str = _
     exclusive: str = _
     hangdependency: str = _
+    inactive: str = _
     jobname: str = _
     join: str = _
     log: str = _
@@ -138,6 +151,7 @@ class _STR(_ValsMatchKeys):
     ECF_TRYNO: str = _
     account: str = _
     action: str = _
+    all: str = _
     base_file: str = _
     batch: str = _
     batchargs: str = _

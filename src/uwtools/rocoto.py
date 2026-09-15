@@ -9,7 +9,6 @@ import sqlite3
 from datetime import timezone
 from enum import Enum, auto
 from functools import reduce
-from itertools import chain
 from math import log10
 from operator import getitem
 from pathlib import Path
@@ -39,7 +38,7 @@ if TYPE_CHECKING:
 DEFAULT_ITERATION_RATE = 10  # seconds
 
 
-def iterate(cycle: datetime, database: Path, rate: int, task: str, workflow: Path) -> bool:
+def iterate(cycle: datetime, database: Path, rate: int, task: str | None, workflow: Path) -> bool:
     return _RocotoIterator(cycle, database, rate, task, workflow).iterate()
 
 
@@ -119,7 +118,9 @@ class _RocotoIterator:
         INACTIVE = auto()
         TRANSIENT = auto()
 
-    def __init__(self, cycle: datetime, database: Path, rate: int, task: str, workflow: Path):
+    def __init__(
+        self, cycle: datetime, database: Path, rate: int, task: str | None, workflow: Path
+    ):
         self._cycle = cycle
         self._database = database
         self._rate = rate
@@ -133,16 +134,20 @@ class _RocotoIterator:
             self._con.close()
 
     def iterate(self) -> bool:
-        state = self._state
-        while state not in self._states[self.State.INACTIVE]:
+        while True:
             if not self._run():
                 return False
-            state = self._state
-            if not state or state in self._states[self.State.ACTIVE]:
-                self._report()
-                log.debug("Sleeping %s seconds", self._rate)
-                sleep(self._rate)
+            if self._state_type is self.State.INACTIVE:
+                break
+            self._report()
+            log.debug("Sleeping %s seconds", self._rate)
+            sleep(self._rate)
+        self._report()
         return True
+
+    @property
+    def _all(self) -> bool:
+        return self._task is None
 
     @property
     def _connection(self) -> sqlite3.Connection | None:
@@ -162,50 +167,89 @@ class _RocotoIterator:
 
     @property
     def _query_data(self) -> dict:
-        return {
-            ROCOTO.taskname: self._task,
-            ROCOTO.cycle: int(self._cycle.replace(tzinfo=timezone.utc).timestamp()),
-        }
+        data: dict = {ROCOTO.cycle: int(self._cycle.replace(tzinfo=timezone.utc).timestamp())}
+        if self._task:
+            data[ROCOTO.taskname] = self._task
+        return data
 
     @property
     def _query_stmt(self) -> str:
-        return "select state from jobs where taskname=:taskname and cycle=:cycle order by id desc"
+        terms = ["cycle=:cycle"]
+        if self._task:
+            terms.append("taskname=:taskname")
+        constraints = " and ".join(terms)
+        return f"select state from jobs where {constraints} order by id desc"  # noqa: S608
 
     def _report(self) -> None:
         cmd = "rocotostat -d %s -w %s" % (self._database, self._workflow)
         if self._database.is_file():
-            log.info("Workflow status:")
             _, output = run_shell_cmd(cmd, quiet=True)
             for line in output.strip().split("\n"):
                 log.info(line)
 
     def _run(self) -> bool:
         log.info("Iterating workflow")
-        cmd = "rocotorun -d %s -w %s -t %s" % (self._database, self._workflow, self._task)
+        task_arg = "-a" if self._all else "-t %s" % self._task
+        cmd = "rocotorun -d %s -w %s %s" % (self._database, self._workflow, task_arg)
         success, _ = run_shell_cmd(cmd, quiet=True)
         return success
 
     @property
-    def _state(self) -> str | None:
-        state = None
-        if cursor := self._cursor:
-            result = cursor.execute(self._query_stmt, self._query_data)
-            if row := result.fetchone():
-                (state,) = row
-                log.info(self._state_msg % state)
-                assert state in chain.from_iterable(self._states.values())
-        return state
+    def _state_msg(self) -> str:
+        x = "s" if self._all else f" '{self._task}'"
+        return f"Task{x} for cycle {self._cycle}: %s"
 
     @property
-    def _state_msg(self) -> str:
-        return f"Rocoto task '{self._task}' for cycle {self._cycle}: %s"
+    def _state_type(self) -> _RocotoIterator.State | None:
+        state_type = None
+        if cursor := self._cursor:
+            result = cursor.execute(self._query_stmt, self._query_data)
+            if self._all:
+                state_type = self._state_type_from_states([row[0] for row in result.fetchall()])
+            elif row := result.fetchone():
+                state_type = self._state_type_from_states([row[0]])
+            if state_type:
+                desc = ROCOTO.inactive if state_type is self.State.INACTIVE else ROCOTO.active
+                log.info(self._state_msg % desc)
+                assert state_type in self.State
+        return state_type
+
+    def _state_type_from_state(self, state: str) -> _RocotoIterator.State:
+        for state_type in self.State:
+            if state in self._states[state_type]:
+                return state_type
+        msg = f"Unexpected state: {state}"
+        raise AssertionError(msg)
+
+    def _state_type_from_states(self, states: list[str]) -> _RocotoIterator.State | None:
+        if not states:
+            return None
+        state_types = set(map(self._state_type_from_state, states))
+        for state_type in [self.State.ACTIVE, self.State.TRANSIENT]:
+            if state_type in state_types:
+                return state_type
+        return self.State.INACTIVE
 
     @property
     def _states(self) -> dict:
         return {
-            self.State.ACTIVE: ["QUEUED", "RUNNING"],
-            self.State.INACTIVE: ["COMPLETE", "DEAD", "ERROR", "STUCK", "SUCCEEDED"],
-            self.State.TRANSIENT: ["CREATED", "DYING", "STALLED", "SUBMITTING"],
+            self.State.ACTIVE: [
+                ROCOTO.QUEUED,
+                ROCOTO.RUNNING,
+            ],
+            self.State.INACTIVE: [
+                ROCOTO.COMPLETE,
+                ROCOTO.DEAD,
+                ROCOTO.ERROR,
+                ROCOTO.STUCK,
+                ROCOTO.SUCCEEDED,
+            ],
+            self.State.TRANSIENT: [
+                ROCOTO.CREATED,
+                ROCOTO.DYING,
+                ROCOTO.STALLED,
+                ROCOTO.SUBMITTING,
+            ],
         }
 
 
